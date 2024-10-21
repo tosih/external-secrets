@@ -130,20 +130,34 @@ func parseError(err error) error {
 	return err
 }
 
-func (c *Client) SecretExists(ctx context.Context, ref esv1beta1.PushSecretRemoteRef) (bool, error) {
-	secretName := fmt.Sprintf("projects/%s/secrets/%s", c.store.ProjectID, ref.GetRemoteKey())
-	gcpSecret, err := c.smClient.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{
+func (c *Client) SecretExists(ctx context.Context, remoteRef esv1beta1.PushSecretRemoteRef) (bool, error) {
+	secretName := fmt.Sprintf("projects/%s/secrets/%s", c.store.ProjectID, remoteRef.GetRemoteKey())
+	_, err := c.smClient.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{
 		Name: secretName,
 	})
+	metrics.ObserveAPICall(constants.ProviderGCPSM, constants.CallGCPSMGetSecret, err)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return false, nil
 		}
-
 		return false, err
 	}
 
-	return gcpSecret != nil, nil
+	gcpVersion, err := c.smClient.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
+		Name: fmt.Sprintf("%s/versions/latest", secretName),
+	})
+	metrics.ObserveAPICall(constants.ProviderGCPSM, constants.CallGCPSMAccessSecretVersion, err)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if gcpVersion != nil && gcpVersion.Payload != nil {
+		return true, nil
+	}
+	return false, nil
 }
 
 // PushSecret pushes a kubernetes secret key into gcp provider Secret.
@@ -176,7 +190,7 @@ func (c *Client) PushSecret(ctx context.Context, secret *corev1.Secret, pushSecr
 			return err
 		}
 
-		var replication = &secretmanagerpb.Replication{
+		replication := &secretmanagerpb.Replication{
 			Replication: &secretmanagerpb.Replication_Automatic_{
 				Automatic: &secretmanagerpb.Replication_Automatic{},
 			},
